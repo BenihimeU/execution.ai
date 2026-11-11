@@ -1,0 +1,41 @@
+{
+  "name": "execution-ai",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "concurrently -n web,api,worker -c blue,green,magenta \"npm:dev:web\" \"npm:dev:api\" \"npm:dev:worker\"",
+    "dev:web": "vite",
+    "dev:api": "node --watch server/src/index.js",
+    "dev:worker": "node --watch server/src/provisioning/worker.js",
+    "start:api": "node server/src/index.js",
+    "start:worker": "node server/src/provisioning/worker.js",
+    "db:migrate": "node server/scripts/migrate.js",
+    "test:api": "node --test server/test/*.test.js",
+    "build": "vite build",
+    "preview": "vite preview",
+    "lint": "eslint ."
+  },
+  "dependencies": {
+    "@vitejs/plugin-react": "latest",
+    "bcryptjs": "^3.0.3",
+    "cors": "^2.8.6",
+    "dotenv": "^18.0.10",
+    "express": "^5.3.0",
+    "helmet": "^8.3.0",
+    "jsonwebtoken": "^9.0.3",
+    "lucide-react": "latest",
+    "pg": "^8.23.1",
+    "react": "latest",
+    "react-dom": "latest",
+    "vite": "latest"
+  },
+  "devDependencies": {
+    "@eslint/js": "latest",
+    "concurrently": "^10.0.7",
+    "eslint": "latest",
+    "eslint-plugin-react-hooks": "latest",
+    "eslint-plugin-react-refresh": "latest",
+    "globals": "latest"
+  }
+}

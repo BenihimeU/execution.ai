@@ -1,0 +1,6 @@
+node_modules/
+dist/
+.DS_Store
+*.local
+.env
+execution-ai.2026-11-11.private-key.pem
