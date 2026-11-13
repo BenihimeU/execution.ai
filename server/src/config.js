@@ -20,5 +20,9 @@ export const config = {
   githubApiUrl: process.env.GITHUB_API_URL || "https://api.github.com",
   workerPollMs: Number(process.env.PROVISIONING_WORKER_POLL_MS || 3000),
   workerMaxAttempts: Number(process.env.PROVISIONING_WORKER_MAX_ATTEMPTS || 3),
+  aiProvider: (process.env.AI_PROVIDER || "openai").toLowerCase(),
+  aiModel: process.env.AI_MODEL || "gpt-4.1-mini",
+  openaiApiKey: process.env.OPENAI_API_KEY || "",
+  geminiApiKey: process.env.GEMINI_API_KEY || "",
 };
 

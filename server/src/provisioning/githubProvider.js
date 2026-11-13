@@ -55,6 +55,54 @@ export class GitHubProvider {
     await this.request(`/repos/${owner}/${repository.name}/environments/${encodeURIComponent(environment.name)}`, { method: "PUT", token, body });
   }
 
+  async commitFiles({ token, owner, repository, branch, baseBranch = "main", files, message }) {
+    const repositoryPath = `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repository)}`;
+    const referenceName = `heads/${encodePath(branch)}`;
+    const readReferencePath = `${repositoryPath}/git/ref/${referenceName}`;
+    const updateReferencePath = `${repositoryPath}/git/refs/${referenceName}`;
+    let reference = await this.request(readReferencePath, { token, allow404: true });
+    if (!reference) {
+      const base = await this.request(`${repositoryPath}/git/ref/heads/${encodePath(baseBranch)}`, { token });
+      reference = await this.request(`${repositoryPath}/git/refs`, { method: "POST", token, body: { ref: `refs/heads/${branch}`, sha: base.object.sha } });
+    }
+    const parent = reference.object.sha;
+    const commit = await this.request(`/repos/${owner}/${repository}/git/commits/${parent}`, { token });
+    const tree = [];
+    for (const [path, content] of Object.entries(files)) {
+      const blob = await this.request(`/repos/${owner}/${repository}/git/blobs`, { method: "POST", token, body: { content, encoding: "utf-8" } });
+      tree.push({ path, mode: "100644", type: "blob", sha: blob.sha });
+    }
+    const nextTree = await this.request(`/repos/${owner}/${repository}/git/trees`, { method: "POST", token, body: { base_tree: commit.tree.sha, tree } });
+    const nextCommit = await this.request(`/repos/${owner}/${repository}/git/commits`, { method: "POST", token, body: { message, tree: nextTree.sha, parents: [parent] } });
+    await this.request(updateReferencePath, { method: "PATCH", token, body: { sha: nextCommit.sha, force: false } });
+    return { branch, commitSha: nextCommit.sha, url: `https://github.com/${owner}/${repository}/tree/${branch}` };
+  }
+
+  async readTextFiles({ token, owner, repository, branch, maxBytes = 300_000 }) {
+    const repositoryPath = `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repository)}`;
+    const reference = await this.request(`${repositoryPath}/git/ref/heads/${encodePath(branch)}`, { token });
+    const commit = await this.request(`${repositoryPath}/git/commits/${reference.object.sha}`, { token });
+    const tree = await this.request(`${repositoryPath}/git/trees/${commit.tree.sha}?recursive=1`, { token });
+    const allowed = /\.(js|jsx|ts|tsx|json|css|scss|html|md|ya?ml|sql)$/i;
+    const candidates = (tree.tree || []).filter((item) => item.type === "blob" && allowed.test(item.path) && !/(^|\/)(node_modules|dist|\.env|package-lock\.json)(\/|$)/.test(item.path));
+    const files = {};
+    let total = 0;
+    for (const item of candidates) {
+      if (total + Number(item.size || 0) > maxBytes) continue;
+      const blob = await this.request(`${repositoryPath}/git/blobs/${item.sha}`, { token });
+      const content = Buffer.from((blob.content || "").replace(/\n/g, ""), "base64").toString("utf8");
+      total += Buffer.byteLength(content); files[item.path] = content;
+    }
+    return files;
+  }
+
+  async ensurePullRequest({ token, owner, repository, branch, baseBranch, title, body }) {
+    const repositoryPath = `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repository)}`;
+    const existing = await this.request(`${repositoryPath}/pulls?state=open&head=${encodeURIComponent(`${owner}:${branch}`)}&base=${encodeURIComponent(baseBranch)}`, { token });
+    if (existing[0]) return existing[0];
+    return this.request(`${repositoryPath}/pulls`, { method: "POST", token, body: { title, body, head: branch, base: baseBranch } });
+  }
+
   async request(path, { method = "GET", token, body, allow404 = false } = {}) {
     const response = await fetch(`${this.apiUrl}${path}`, { method, headers: { Accept: "application/vnd.github+json", Authorization: `Bearer ${token}`, "User-Agent": "Execution-AI-Provisioner", "X-GitHub-Api-Version": "2022-11-28", ...(body ? { "Content-Type": "application/json" } : {}) }, body: body ? JSON.stringify(body) : undefined });
     if (allow404 && response.status === 404) return null;

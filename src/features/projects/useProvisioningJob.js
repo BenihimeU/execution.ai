@@ -4,6 +4,7 @@ import { api } from "../../lib/api.js";
 export function useProvisioningJob(jobId, onComplete) {
   const [job, setJob] = useState(null);
   const [error, setError] = useState("");
+  const [pollRevision, setPollRevision] = useState(0);
   const onCompleteRef = useRef(onComplete);
   useEffect(() => { onCompleteRef.current = onComplete; }, [onComplete]);
 
@@ -33,11 +34,15 @@ export function useProvisioningJob(jobId, onComplete) {
 
     refresh();
     return () => { active = false; window.clearTimeout(timer); };
-  }, [jobId]);
+  }, [jobId, pollRevision]);
 
   async function retry() {
     setError("");
-    try { await api.retryProvisioningJob(jobId); setJob((current) => current ? { ...current, status: "queued", currentStep: "queued", error: null } : current); }
+    try {
+      await api.retryProvisioningJob(jobId);
+      setJob((current) => current ? { ...current, status: "queued", currentStep: "queued", error: null } : current);
+      setPollRevision((revision) => revision + 1);
+    }
     catch (requestError) { setError(requestError.message); }
   }
 

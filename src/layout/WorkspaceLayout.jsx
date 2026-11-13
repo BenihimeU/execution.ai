@@ -42,13 +42,18 @@ export function WorkspaceLayout({ workspace, onChange, onLogout, initialPage = "
     onChange(await api.getWorkspace());
     return job;
   }
+  async function generateProject(projectId) {
+    const job = await api.generateProject(projectId);
+    onChange(await api.getWorkspace());
+    return job;
+  }
 
   const sharedPageProps = { workspace, onAddClient: () => setModal({ type: "client" }), onAddProject: openProjectModal, onOpenProject: (projectId) => setPage(`project:${projectId}`) };
 
   return <div className="app-shell">
     <aside className={menuOpen ? "sidebar sidebar--open" : "sidebar"}><div className="sidebar__top"><Logo /><button className="sidebar__close" onClick={() => setMenuOpen(false)}><X size={20} /></button></div><div className="org-switcher"><span>{workspace.organization.name.slice(0, 2).toUpperCase()}</span><div><strong>{workspace.organization.name}</strong><small>Organization</small></div><ChevronDown size={15} /></div><nav>{nav.map(({ id, label, Icon }) => <button className={page === id ? "active" : ""} key={id} onClick={() => { setPage(id); setMenuOpen(false); }}><Icon size={18} />{label}</button>)}</nav><div className="sidebar__footer"><button><CircleUserRound size={18} /><span><strong>{workspace.organization.email.split("@")[0]}</strong><small>{workspace.organization.email}</small></span></button><button className="logout" onClick={onLogout} title="Leave workspace"><LogOut size={17} /></button></div></aside>
     {menuOpen && <button className="mobile-overlay" onClick={() => setMenuOpen(false)} aria-label="Close navigation" />}
-    <main className="app-main"><header className="mobile-header"><button onClick={() => setMenuOpen(true)}><Menu size={22} /></button><Logo /></header><div className="content">{page === "dashboard" && <DashboardPage {...sharedPageProps} onViewProjects={() => setPage("projects")} />}{page === "clients" && <ClientsPage {...sharedPageProps} />}{page === "projects" && <ProjectsPage {...sharedPageProps} />}{page === "integrations" && <IntegrationsPage callbackResult={integrationResult} />}{detailProject && <ProjectDetailPage project={detailProject} client={workspace.clients.find((client) => client.id === detailProject.clientId)} onBack={() => setPage("projects")} onUpdate={(changes) => updateProject(detailProject.id, changes)} onProvision={() => provisionProject(detailProject.id)} onRefresh={async () => onChange(await api.getWorkspace())} />}</div></main>
+    <main className="app-main"><header className="mobile-header"><button onClick={() => setMenuOpen(true)}><Menu size={22} /></button><Logo /></header><div className="content">{page === "dashboard" && <DashboardPage {...sharedPageProps} onViewProjects={() => setPage("projects")} />}{page === "clients" && <ClientsPage {...sharedPageProps} />}{page === "projects" && <ProjectsPage {...sharedPageProps} />}{page === "integrations" && <IntegrationsPage callbackResult={integrationResult} />}{detailProject && <ProjectDetailPage project={detailProject} client={workspace.clients.find((client) => client.id === detailProject.clientId)} onBack={() => setPage("projects")} onUpdate={(changes) => updateProject(detailProject.id, changes)} onProvision={() => provisionProject(detailProject.id)} onGenerate={() => generateProject(detailProject.id)} onRefresh={async () => onChange(await api.getWorkspace())} />}</div></main>
     {modal?.type === "client" && <ClientModal onClose={() => setModal(null)} onSave={addClient} />}
     {modal?.type === "project" && <ProjectModal clients={workspace.clients} selectedClientId={modal.clientId} onClose={() => setModal(null)} onSave={addProject} />}
   </div>;
