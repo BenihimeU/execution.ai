@@ -19,5 +19,5 @@ export function createProvisioningManifest(project, plan, environments) {
 }
 
 function repository(name, type, directories, workflow) {
-  return { name, type, visibility: "private", defaultBranch: "main", branchProtection: { pullRequestRequired: true, checksRequired: true, forcePushBlocked: true }, directories, workflow, status: "Ready" };
+  return { name, type, visibility: "private", defaultBranch: "main", directories, workflow, status: "Ready" };
 }

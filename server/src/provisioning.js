@@ -6,7 +6,7 @@ export function buildProvisioningManifest(projectId, project) {
   }
   const slug = project.name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
   const environments = project.environments || ["Development", "Test", "Production"];
-  const repository = (name, type, workflow) => ({ name, type, visibility: "private", defaultBranch: "main", workflow, branchProtection: { pullRequestRequired: true, checksRequired: true, forcePushBlocked: true }, status: "Pending provider connection" });
+  const repository = (name, type, workflow) => ({ name, type, visibility: "private", defaultBranch: "main", workflow, status: "Pending provider connection" });
   return {
     version: 1,
     status: "awaiting_provider",

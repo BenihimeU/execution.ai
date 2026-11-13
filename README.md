@@ -80,7 +80,10 @@ branch protection, and deployment environments.
 Create a GitHub App with repository creation, contents, workflows,
 administration, environments, actions, and metadata permissions. Configure its
 App ID, slug, and private key in `.env`. Set the GitHub App Setup URL to the
-Execution AI web URL (for local development, `http://localhost:5173/`).
+Execution AI callback endpoint (for local development,
+`http://localhost:4000/api/provider-connections/github/complete`). The endpoint
+redirects the browser to the web application, where the signed installation
+request is completed using the current user session.
 
 Organization administrators connect GitHub from **Integrations → GitHub →
 Connect GitHub**. Execution AI signs the installation request, GitHub redirects

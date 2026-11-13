@@ -39,6 +39,11 @@
 .job-message--waiting { border-color: #715d2d; color: #ffe6a7; background: #39311f; }
 .job-message--error { border-color: #71404b; color: #ffc5ce; background: #3b242b; }
 .job-message--success { border-color: #32664f; color: #b9f2d5; background: #20382f; }
+.stack-warning { margin: 16px 21px 0; padding: 11px 13px; border: 1px solid #ead7a3; border-radius: 9px; color: #795f1c; background: #fff9e8; font-size: 10px; line-height: 1.5; }
+.repository-status { display: inline-flex; align-items: center; gap: 5px; }
+.repository-status--creating { color: #6d54d8 !important; }
+.repository-status--creating svg { animation: repository-spin .8s linear infinite; }
+@keyframes repository-spin { to { transform: rotate(360deg); } }
 
 .integration-notice {
   display: flex;
@@ -66,6 +71,8 @@
 .connection-empty span,.connection-summary small { margin-top: 4px; color: #8d92a0; font-size: 10px; }
 .connection-summary > span { display: grid; place-items: center; width: 40px; height: 40px; border-radius: 11px; color: #267553; background: #e9f8f0; }
 .connection-summary em { display: inline-flex; align-items: center; gap: 5px; margin-left: 12px; border-radius: 999px; padding: 5px 9px; color: #267553; background: #e9f8f0; font-size: 9px; font-style: normal; font-weight: 800; }
+.connection-summary--error > span { color: #ad384a; background: #fff0f2; }
+.connection-summary--error em { color: #ad384a; background: #fff0f2; }
 .integration-actions { display: flex; gap: 8px; }
 .button--danger { border: 1px solid #f0c5cb; color: #ad384a; background: #fff6f7; }
 .integration-card > footer { display: flex; gap: 9px; padding: 14px 23px; border-top: 1px solid #eceef2; color: #8c919d; background: #fafbfc; font-size: 9px; }

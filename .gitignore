@@ -4,3 +4,4 @@ dist/
 *.local
 .env
 execution-ai.2026-11-11.private-key.pem
+vish-execution-ai.2026-11-12.private-key.pem

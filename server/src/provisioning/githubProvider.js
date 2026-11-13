@@ -48,10 +48,6 @@ export class GitHubProvider {
     }
   }
 
-  async ensureBranchProtection({ token, owner, repository }) {
-    await this.request(`/repos/${owner}/${repository.name}/branches/main/protection`, { method: "PUT", token, body: { required_status_checks: null, enforce_admins: false, required_pull_request_reviews: { required_approving_review_count: 1 }, restrictions: null, allow_force_pushes: false, allow_deletions: false } });
-  }
-
   async ensureEnvironment({ token, owner, repository, environment }) {
     const body = environment.protection === "automatic"
       ? { deployment_branch_policy: null }

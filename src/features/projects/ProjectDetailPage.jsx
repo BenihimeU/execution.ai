@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Check, GitBranch, Image, ListChecks, MessageSquareText, Play, Plus, Rocket, ServerCog } from "lucide-react";
+import { Check, GitBranch, Image, ListChecks, LoaderCircle, MessageSquareText, Play, Plus, Rocket, ServerCog } from "lucide-react";
 import { DEFAULT_ENVIRONMENTS } from "../../domain/workspace.js";
 import { approveProjectPlan, generateProjectPlan } from "../../domain/projectPlanning.js";
 import { useProvisioningJob } from "./useProvisioningJob.js";
@@ -38,7 +38,7 @@ export function ProjectDetailPage({ project, client, onBack, onUpdate, onProvisi
       <section className="provision-card"><span><Rocket size={22} /></span><h2>{provisioned ? "Provisioning requested" : "Provision development stack"}</h2><p>{provisioned ? "Execution AI is creating and configuring the delivery stack." : "Provisioning is unlocked after the generated delivery plan is reviewed and approved."}</p>{job && <ProvisioningJobStatus job={job} onRetry={retry} />}{jobError && <div className="job-message job-message--error">Status could not be refreshed: {jobError}</div>}<button className="button button--primary button--wide" onClick={provision} disabled={!planApproved || provisioning || ["queued", "running", "retrying"].includes(job?.status)}><Play size={16} /> {provisioning ? "Starting…" : provisioned ? "Re-provision stack" : "Provision repositories"}</button>{!planApproved ? <small>Approve the project plan to continue.</small> : null}{provisionError && <small className="provision-error">{provisionError}</small>}</section></aside>
     </div>
     <PlanningWorkspace plan={project.projectPlan} canGenerate={Boolean(brief.discussion.trim() && brief.plan.trim())} onGenerate={generatePlan} onApprove={approvePlan} />
-    {provisioned && <GeneratedStack provisioning={project.provisioning} />}
+    {provisioned && <GeneratedStack provisioning={project.provisioning} job={job} />}
   </>;
 }
 
@@ -49,18 +49,23 @@ function ProvisioningJobStatus({ job, onRetry }) {
     const rateLimited = job.error?.status === 403 && /rate limit/i.test(job.error?.message || "");
     return <div className="job-message job-message--waiting"><strong>{rateLimited ? "GitHub temporarily paused repository creation" : "Provisioning will retry automatically"}</strong><span>{rateLimited ? `GitHub rejected the write before creating a repository. Execution AI will retry automatically at ${retryTime}. No action is required.` : `The ${step} step will retry at ${retryTime}.`}</span><small>Attempt {job.attempts} · {step}</small></div>;
   }
-  if (job.status === "failed") return <div className="job-message job-message--error"><strong>Provisioning stopped at {step}</strong><span>{friendlyError(job.error)}</span><button className="button button--ghost" onClick={onRetry}>Retry provisioning</button></div>;
-  if (job.status === "ready") return <div className="job-message job-message--success"><strong>Repositories and pipelines are ready</strong><span>Execution AI completed the GitHub configuration.</span></div>;
+  if (job.status === "failed") { const reconnectRequired = job.error?.code === "GITHUB_REPOSITORY_CREATION_BLOCKED"; return <div className="job-message job-message--error"><strong>Provisioning stopped at {step}</strong><span>{friendlyError(job.error)}</span>{!reconnectRequired && <button className="button button--ghost" onClick={onRetry}>Retry provisioning</button>}</div>; }
+  if (job.status === "ready") {
+    const planWarnings = job.result?.warnings || [];
+    return <div className={`job-message ${planWarnings.length ? "job-message--waiting" : "job-message--success"}`}><strong>Repositories and pipelines are ready</strong><span>{planWarnings.length ? "Provisioning completed, but GitHub plan restrictions prevented some protection rules." : "Execution AI completed the GitHub configuration."}</span>{planWarnings.length > 0 && <small>{planWarnings.length} optional configuration {planWarnings.length === 1 ? "warning" : "warnings"}</small>}</div>;
+  }
   return <div className="job-message job-message--active"><strong>{job.status === "queued" ? "Provisioning queued" : `Working on ${step}`}</strong><span>Execution AI is configuring GitHub. You can leave this page safely.</span><small>Attempt {job.attempts || 0}</small></div>;
 }
 
 function readableStep(step = "queued") {
-  return step.replace(/^failed:/, "").replaceAll("_", " ").replace(/\b\w/g, (letter) => letter.toUpperCase());
+  return String(step || "queued").replace(/^failed:/, "").replaceAll("_", " ").replace(/\b\w/g, (letter) => letter.toUpperCase());
 }
 
 function friendlyError(error) {
   if (!error) return "An unexpected provisioning error occurred.";
+  if (error.code === "GITHUB_REPOSITORY_CREATION_BLOCKED") return "GitHub repeatedly blocked repository creation even though normal API capacity remains. Connect the GitHub App to an organization account and provision there, or contact GitHub Support before retrying.";
   if (error.code === "GITHUB_APP_NOT_CONFIGURED") return "The Execution AI administrator must configure the GitHub App before provisioning.";
+  if (error.status === 403 && /upgrade to github pro|make this repository public/i.test(error.message || "")) return "GitHub Free does not support branch protection on this private repository. Retry provisioning; Execution AI will continue and record protection as unavailable.";
   if (error.status === 401) return "GitHub rejected the App credentials. Reconnect GitHub or ask an administrator to rotate the private key.";
   if (error.status === 403) return "GitHub denied this operation. Confirm the App permissions and installation access, then retry.";
   if (error.status === 404) return "The GitHub installation or target account could not be found. Reconnect the integration and retry.";
@@ -73,6 +78,13 @@ function PlanningWorkspace({ plan, canGenerate, onGenerate, onApprove }) {
   </section>;
 }
 
-function GeneratedStack({ provisioning }) {
-  return <section className="panel stack-panel"><header><div><h2>Provisioning manifest</h2><p>{provisioning.idempotencyKey ? `Idempotent resource contract: ${provisioning.idempotencyKey}` : "Legacy provisioning record — re-provision to upgrade the manifest."}</p></div><span className="ready-badge"><Check size={13} /> {provisioning.status === "ready" ? "Ready" : "Awaiting provider"}</span></header><div className="stack-grid"><div><h3><GitBranch size={17} /> Repositories</h3>{(provisioning.repositories || []).map((repo) => <article key={repo.name}><span><strong>{repo.name}</strong><small>{repo.type} · private · protected main</small></span><em>{repo.status}</em></article>)}</div><div><h3><ServerCog size={17} /> Deployment pipelines</h3>{(provisioning.pipelines || []).map((pipeline) => <article key={pipeline.name}><span><strong>{pipeline.name}</strong><small>{pipeline.stages?.join(" · ") || "Build · test · deploy"}</small></span><em>{pipeline.status}</em></article>)}</div></div></section>;
+function GeneratedStack({ provisioning, job }) {
+  return <section className="panel stack-panel"><header><div><h2>Provisioning manifest</h2><p>{provisioning.idempotencyKey ? `Idempotent resource contract: ${provisioning.idempotencyKey}` : "Legacy provisioning record — re-provision to upgrade the manifest."}</p></div><span className="ready-badge"><Check size={13} /> {provisioning.status === "ready" ? "Ready" : "Awaiting provider"}</span></header>{provisioning.warnings?.length > 0 && <div className="stack-warning">Completed with {provisioning.warnings.length} optional GitHub configuration {provisioning.warnings.length === 1 ? "warning" : "warnings"}.</div>}<div className="stack-grid"><div><h3><GitBranch size={17} /> Repositories</h3>{(provisioning.repositories || []).map((repo) => <RepositoryStatus key={repo.name} repository={repo} provisioning={provisioning} job={job} />)}</div><div><h3><ServerCog size={17} /> Deployment pipelines</h3>{(provisioning.pipelines || []).map((pipeline) => <article key={pipeline.name}><span><strong>{pipeline.name}</strong><small>{pipeline.stages?.join(" · ") || "Build · test · deploy"}</small></span><em>{pipeline.status}</em></article>)}</div></div></section>;
+}
+
+function RepositoryStatus({ repository, provisioning, job }) {
+  const repositoryType = repository.type?.toLowerCase();
+  const creating = job?.status === "running" && job.currentStep === `creating_${repositoryType}_repository`;
+  const status = repository.status || (provisioning.status === "ready" ? "Ready" : "Pending");
+  return <article><span><strong>{repository.name}</strong><small>{repository.type} · private</small></span><em className={creating ? "repository-status repository-status--creating" : "repository-status"}>{creating && <LoaderCircle size={13} />} {creating ? "Creating…" : status}</em></article>;
 }

@@ -39,12 +39,15 @@ async function claimJob() {
 }
 
 async function failJob(job, error) {
-  const retryable = error.retryable !== false && job.attempts < config.workerMaxAttempts;
+  const persistentRepositoryLimit = error.status === 403 && /rate limit/i.test(error.message) && Number(error.rateLimitRemaining) > 0 && job.attempts >= 2;
+  const retryable = !persistentRepositoryLimit && error.retryable !== false && job.attempts < config.workerMaxAttempts;
+  const errorCode = persistentRepositoryLimit ? "GITHUB_REPOSITORY_CREATION_BLOCKED" : error.code || null;
   const resetDelay = error.rateLimitReset ? Math.max(30, Number(error.rateLimitReset) - Math.floor(Date.now() / 1000) + 5) : 0;
   const delaySeconds = error.retryAfter || resetDelay || Math.min(300, 2 ** job.attempts * 15);
   const current = await query("select current_step from provisioning_jobs where id = $1", [job.id]);
   const failedStep = current.rows[0]?.current_step || "unknown";
-  await query(`update provisioning_jobs set status = $1, current_step = $2, error = $3, available_at = now() + ($4 * interval '1 second'), locked_at = null, locked_by = null, updated_at = now() where id = $5`, [retryable ? "retrying" : "failed", `failed:${failedStep}`, { message: error.message, code: error.code || null, status: error.status || null, step: failedStep, retryAfter: error.retryAfter || null, rateLimitRemaining: error.rateLimitRemaining ?? null, rateLimitReset: error.rateLimitReset ?? null, documentationUrl: error.documentationUrl || null, at: new Date().toISOString() }, delaySeconds, job.id]);
+  await query(`update provisioning_jobs set status = $1, current_step = $2, error = $3, available_at = now() + ($4 * interval '1 second'), locked_at = null, locked_by = null, updated_at = now() where id = $5`, [retryable ? "retrying" : "failed", `failed:${failedStep}`, { message: error.message, code: errorCode, status: error.status || null, step: failedStep, retryAfter: error.retryAfter || null, rateLimitRemaining: error.rateLimitRemaining ?? null, rateLimitReset: error.rateLimitReset ?? null, documentationUrl: error.documentationUrl || null, at: new Date().toISOString() }, delaySeconds, job.id]);
+  if (persistentRepositoryLimit) await query("update provider_connections set status = 'needs_attention', last_error = $1, updated_at = now() where id = $2", [{ code: errorCode, message: error.message, step: failedStep, at: new Date().toISOString() }, job.provider_connection_id]);
 }
 
 async function main() {

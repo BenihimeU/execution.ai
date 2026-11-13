@@ -85,23 +85,43 @@ app.get("/api/provider-connections/github/install-url", requireAuth, (req, res) 
   res.json({ url: `https://github.com/apps/${encodeURIComponent(config.githubAppSlug)}/installations/new?state=${encodeURIComponent(state)}` });
 });
 
+// GitHub opens the App Setup URL in the browser with a GET request. Send that
+// browser back to the SPA, which can use the signed state and the user's
+// existing session to complete the connection through the authenticated POST
+// endpoint below.
+app.get("/api/provider-connections/github/complete", (req, res) => {
+  const destination = new URL(config.webOrigin);
+  for (const key of ["installation_id", "setup_action", "state"]) {
+    if (typeof req.query[key] === "string") destination.searchParams.set(key, req.query[key]);
+  }
+  res.redirect(303, destination.toString());
+});
+
 app.post("/api/provider-connections/github/complete", requireAuth, validate(githubCallbackSchema), async (req, res, next) => {
   try {
     verifyIntegrationState(req.body.state, req.auth);
     const installation = await new GitHubProvider().getInstallation(req.body.installationId);
     if (!installation?.account?.login) return res.status(400).json({ error: "GitHub installation account could not be verified" });
-    const result = await query(`insert into provider_connections (organization_id, provider, external_owner, external_account_type, installation_id) values ($1, 'github', $2, $3, $4) on conflict (organization_id, provider) do update set external_owner = excluded.external_owner, external_account_type = excluded.external_account_type, installation_id = excluded.installation_id, updated_at = now() returning id, provider, external_owner as owner, external_account_type as "accountType", installation_id as "installationId", created_at as "createdAt"`, [req.auth.organizationId, installation.account.login, installation.account.type, req.body.installationId]);
+    const result = await query(`insert into provider_connections (organization_id, provider, external_owner, external_account_type, installation_id, status, last_error) values ($1, 'github', $2, $3, $4, 'connected', null) on conflict (organization_id, provider) do update set external_owner = excluded.external_owner, external_account_type = excluded.external_account_type, installation_id = excluded.installation_id, status = 'connected', last_error = null, updated_at = now() returning id, provider, external_owner as owner, external_account_type as "accountType", installation_id as "installationId", status, last_error as "lastError", created_at as "createdAt"`, [req.auth.organizationId, installation.account.login, installation.account.type, req.body.installationId]);
     res.json(result.rows[0]);
-  } catch (error) { next(error); }
+  } catch (error) {
+    if (error.status === 404) {
+      return res.status(409).json({
+        code: "GITHUB_INSTALLATION_NOT_ACCESSIBLE",
+        error: "GitHub installation could not be accessed by the configured GitHub App. Verify that GITHUB_APP_ID, GITHUB_APP_SLUG, and GITHUB_PRIVATE_KEY all belong to the same App that was installed, then reconnect GitHub.",
+      });
+    }
+    next(error);
+  }
 });
 
 app.get("/api/provider-connections", requireAuth, async (req, res, next) => {
-  try { const result = await query(`select id, provider, external_owner as owner, external_account_type as "accountType", installation_id as "installationId", created_at as "createdAt" from provider_connections where organization_id = $1 order by provider`, [req.auth.organizationId]); res.json(result.rows); }
+  try { const result = await query(`select id, provider, external_owner as owner, external_account_type as "accountType", installation_id as "installationId", status, last_error as "lastError", created_at as "createdAt" from provider_connections where organization_id = $1 order by provider`, [req.auth.organizationId]); res.json(result.rows); }
   catch (error) { next(error); }
 });
 
 app.delete("/api/provider-connections/github", requireAuth, async (req, res, next) => {
-  try { await query("delete from provider_connections where organization_id = $1 and provider = 'github'", [req.auth.organizationId]); res.status(204).end(); }
+  try { await query("update provider_connections set status = 'disconnected', last_error = null, updated_at = now() where organization_id = $1 and provider = 'github'", [req.auth.organizationId]); res.status(204).end(); }
   catch (error) { next(error); }
 });
 
@@ -112,10 +132,27 @@ app.post("/api/projects/:id/provision", requireAuth, async (req, res, next) => {
     const result = await client.query("select id, data from projects where id = $1 and organization_id = $2 for update", [req.params.id, req.auth.organizationId]);
     if (!result.rowCount) { await client.query("rollback"); return res.status(404).json({ error: "Project not found" }); }
     const current = result.rows[0];
-    const connection = await client.query("select id from provider_connections where organization_id = $1 and provider = 'github'", [req.auth.organizationId]);
+    const connection = await client.query("select id, status, last_error from provider_connections where organization_id = $1 and provider = 'github'", [req.auth.organizationId]);
     if (!connection.rowCount) { await client.query("rollback"); return res.status(409).json({ code: "PROVIDER_CONNECTION_REQUIRED", error: "Connect a GitHub organization before provisioning" }); }
+    if (connection.rows[0].status !== "connected") { await client.query("rollback"); return res.status(409).json({ code: connection.rows[0].status === "needs_attention" ? "PROVIDER_CONNECTION_UNHEALTHY" : "PROVIDER_CONNECTION_REQUIRED", error: connection.rows[0].status === "needs_attention" ? "GitHub is blocking repository creation for this installation. Reconnect the App to a GitHub organization before provisioning." : "Connect GitHub before provisioning." }); }
     const manifest = buildProvisioningManifest(current.id, current.data);
-    const job = await client.query(`insert into provisioning_jobs (organization_id, project_id, provider_connection_id, idempotency_key, manifest) values ($1, $2, $3, $4, $5) on conflict (idempotency_key) do update set updated_at = provisioning_jobs.updated_at returning id, status, current_step as "currentStep", created_at as "createdAt"`, [req.auth.organizationId, current.id, connection.rows[0].id, manifest.idempotencyKey, manifest]);
+    const job = await client.query(`
+      insert into provisioning_jobs (organization_id, project_id, provider_connection_id, idempotency_key, manifest)
+      values ($1, $2, $3, $4, $5)
+      on conflict (idempotency_key) do update
+        set provider_connection_id = excluded.provider_connection_id,
+            manifest = excluded.manifest,
+            status = case when provisioning_jobs.status = 'failed' then 'queued' else provisioning_jobs.status end,
+            current_step = case when provisioning_jobs.status = 'failed' then 'queued' else provisioning_jobs.current_step end,
+            result = case when provisioning_jobs.status = 'failed' then '{}'::jsonb else provisioning_jobs.result end,
+            error = case when provisioning_jobs.status = 'failed' then null else provisioning_jobs.error end,
+            attempts = case when provisioning_jobs.status = 'failed' then 0 else provisioning_jobs.attempts end,
+            available_at = case when provisioning_jobs.status = 'failed' then now() else provisioning_jobs.available_at end,
+            locked_at = case when provisioning_jobs.status = 'failed' then null else provisioning_jobs.locked_at end,
+            locked_by = case when provisioning_jobs.status = 'failed' then null else provisioning_jobs.locked_by end,
+            updated_at = now()
+      returning id, status, current_step as "currentStep", created_at as "createdAt"
+    `, [req.auth.organizationId, current.id, connection.rows[0].id, manifest.idempotencyKey, manifest]);
     const provisioning = { ...manifest, status: "queued", jobId: job.rows[0].id };
     await client.query("update projects set data = data || $1::jsonb, updated_at = now() where id = $2", [JSON.stringify({ provisioning, status: "Provisioning" }), current.id]);
     await client.query("commit");
