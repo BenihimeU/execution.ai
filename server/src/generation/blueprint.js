@@ -1,3 +1,5 @@
+import { projectNeedsBackend } from "../architecture.js";
+
 export function createApplicationBlueprint(project) {
   const plan = project.projectPlan;
   if (plan?.status !== "approved") throw Object.assign(new Error("The delivery plan must be approved before generation"), { status: 409 });
@@ -10,6 +12,7 @@ export function createApplicationBlueprint(project) {
       pages: ["Dashboard", ...resources.map((resource) => title(resource.plural))],
       apiOperations: resources.flatMap((resource) => [`list${title(resource.plural)}`, `create${title(resource.singular)}`]),
     },
+    application: { backendRequired: projectNeedsBackend(project) },
     backend: {
       runtime: "Node.js and Express",
       routes: resources.flatMap((resource) => [

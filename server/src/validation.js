@@ -14,5 +14,8 @@ export const changeRequestSchema = z.object({
   repositories: repositoryTargets,
 });
 export const changeRequestPatchSchema = changeRequestSchema.partial().refine((value) => Object.keys(value).length > 0, "At least one change is required");
+export const environmentSchema = z.object({ name: z.string().trim().min(2).max(80), environmentType: z.enum(["development", "test", "production", "custom"]), deploymentProvider: z.enum(["github", "aws"]).default("github"), deploymentStrategy: z.enum(["workflow_dispatch", "external"]).default("workflow_dispatch"), requiresApproval: z.boolean().default(false), configuration: z.object({ awsRegion: z.string().trim().max(80).optional(), awsRoleArn: z.string().trim().max(300).optional() }).passthrough().optional().default({}) });
+export const deploymentSchema = z.object({ environmentId: z.string().uuid() });
+export const planningAssistanceSchema = z.object({ discussion: z.string().trim().min(20).max(20_000), initialPlan: z.string().trim().max(20_000).optional().default("") });
 export function validate(schema) { return (req, res, next) => { const result = schema.safeParse(req.body); if (!result.success) return res.status(400).json({ error: "Invalid request", details: result.error.flatten() }); req.body = result.data; next(); }; }
 

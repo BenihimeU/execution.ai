@@ -38,21 +38,43 @@ export class GitHubProvider {
     return { ...created, type: specification.type };
   }
 
+  async getRepository({ token, owner, repository }) {
+    return this.request(`/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repository)}`, { token });
+  }
+
+  async setDefaultBranch({ token, owner, repository, branch }) {
+    return this.request(`/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repository)}`, { method: "PATCH", token, body: { default_branch: branch } });
+  }
+
   async ensureTemplateFiles({ token, owner, repository, projectName }) {
     const files = templateFiles(repository.type, projectName);
+    return this.ensureFiles({ token, owner, repository: repository.name, files });
+  }
+
+  async ensureFiles({ token, owner, repository, files, branch }) {
     for (const [path, content] of Object.entries(files)) {
-      const current = await this.request(`/repos/${owner}/${repository.name}/contents/${encodePath(path)}`, { token, allow404: true });
+      const suffix = branch ? `?ref=${encodeURIComponent(branch)}` : "";
+      const current = await this.request(`/repos/${owner}/${repository}/contents/${encodePath(path)}${suffix}`, { token, allow404: true });
       const encoded = Buffer.from(content).toString("base64");
       if (current?.content && Buffer.from(current.content.replace(/\n/g, ""), "base64").toString() === content) continue;
-      await this.request(`/repos/${owner}/${repository.name}/contents/${encodePath(path)}`, { method: "PUT", token, body: { message: current ? `Update ${path}` : `Add ${path}`, content: encoded, ...(current?.sha ? { sha: current.sha } : {}) } });
+      await this.request(`/repos/${owner}/${repository}/contents/${encodePath(path)}`, { method: "PUT", token, body: { message: current ? `chore: update ${path}` : `chore: add ${path}`, content: encoded, ...(current?.sha ? { sha: current.sha } : {}), ...(branch ? { branch } : {}) } });
     }
   }
 
   async ensureEnvironment({ token, owner, repository, environment }) {
     const body = environment.protection === "automatic"
       ? { deployment_branch_policy: null }
-      : { deployment_branch_policy: { protected_branches: true, custom_branch_policies: false } };
+      : environment.protection === "custom"
+        ? { deployment_branch_policy: { protected_branches: false, custom_branch_policies: true } }
+        : { deployment_branch_policy: { protected_branches: true, custom_branch_policies: false } };
     await this.request(`/repos/${owner}/${repository.name}/environments/${encodeURIComponent(environment.name)}`, { method: "PUT", token, body });
+  }
+
+  async ensureEnvironmentBranchPolicy({ token, owner, repository, environment, branch }) {
+    const path = `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repository)}/environments/${encodeURIComponent(environment)}/deployment-branch-policies`;
+    const policies = await this.request(`${path}?per_page=100`, { token });
+    if (policies.branch_policies?.some((policy) => policy.name === branch && policy.type === "branch")) return;
+    await this.request(path, { method: "POST", token, body: { name: branch, type: "branch" } });
   }
 
   async commitFiles({ token, owner, repository, branch, baseBranch = "main", files, message }) {
@@ -101,6 +123,40 @@ export class GitHubProvider {
     const existing = await this.request(`${repositoryPath}/pulls?state=open&head=${encodeURIComponent(`${owner}:${branch}`)}&base=${encodeURIComponent(baseBranch)}`, { token });
     if (existing[0]) return existing[0];
     return this.request(`${repositoryPath}/pulls`, { method: "POST", token, body: { title, body, head: branch, base: baseBranch } });
+  }
+
+  async dispatchWorkflow({ token, owner, repository, workflow = "deploy.yml", ref, inputs }) {
+    return this.request(`/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repository)}/actions/workflows/${encodeURIComponent(workflow)}/dispatches`, { method: "POST", token, body: { ref, inputs } });
+  }
+
+  async ensurePagesSite({ token, owner, repository }) {
+    const path = `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repository)}/pages`;
+    try {
+      const existing = await this.request(path, { token, allow404: true });
+      if (existing) return existing;
+      return await this.request(path, { method: "POST", token, body: { build_type: "workflow" } });
+    }
+    catch (error) {
+      if (error.status === 403) {
+        error.message = "GitHub Pages could not be enabled. Give the Execution AI GitHub App Pages: read/write and Administration: read/write permissions, approve the updated organization installation, then retry.";
+      }
+      throw error;
+    }
+  }
+
+  async mergePullRequest({ token, owner, repository, pullNumber }) {
+    return this.request(`/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repository)}/pulls/${pullNumber}/merge`, { method: "PUT", token, body: { merge_method: "squash" } });
+  }
+
+  async getWorkflowRuns({ token, owner, repository, workflow = "deploy.yml", branch, event = "workflow_dispatch" }) {
+    const query = new URLSearchParams({ branch, per_page: "20" });
+    if (event) query.set("event", event);
+    const result = await this.request(`/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repository)}/actions/workflows/${encodeURIComponent(workflow)}/runs?${query}`, { token });
+    return result.workflow_runs || [];
+  }
+
+  async getWorkflowRun({ token, owner, repository, runId }) {
+    return this.request(`/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repository)}/actions/runs/${runId}`, { token });
   }
 
   async request(path, { method = "GET", token, body, allow404 = false } = {}) {

@@ -4,15 +4,17 @@ import { config } from "../config.js";
 import { pool, query } from "../db.js";
 import { GitHubProvider } from "../provisioning/githubProvider.js";
 import { executeGenerationJob } from "./executor.js";
+import { GenerationAiProvider } from "./aiProvider.js";
 
 const workerId = `${process.pid}:${randomUUID()}`;
 const github = new GitHubProvider();
+const ai = new GenerationAiProvider();
 let stopping = false;
 
 export async function runOnce() {
   const job = await claimJob();
   if (!job) return false;
-  try { await executeGenerationJob(job, github); }
+  try { await executeGenerationJob(job, github, ai); }
   catch (error) { await failJob(job, error); }
   return true;
 }
@@ -35,7 +37,7 @@ async function failJob(job, error) {
 }
 
 async function main() {
-  console.log(`Generation worker ${workerId} started`);
+  console.log(`Generation worker ${workerId} started with ${config.aiProvider}:${config.aiModel}`);
   while (!stopping) {
     const worked = await runOnce().catch((error) => { console.error("Generation worker iteration failed", error); return false; });
     if (!worked) await new Promise((resolve) => setTimeout(resolve, config.workerPollMs));

@@ -2,17 +2,31 @@ import bcrypt from "bcryptjs";
 import cors from "cors";
 import express from "express";
 import helmet from "helmet";
+import { handleGitHubWebhook, verifyGitHubWebhook } from "./cicd/githubWebhook.js";
+import { reconcileChangeRuns, reconcileDeploymentRuns } from "./cicd/reconcile.js";
+import { autoDeployDevelopment, dispatchDeployments } from "./cicd/deploymentService.js";
 import { config } from "./config.js";
 import { createIntegrationState, createToken, requireAuth, verifyIntegrationState } from "./auth.js";
 import { pool, query } from "./db.js";
 import { buildProvisioningManifest } from "./provisioning.js";
 import { GitHubProvider } from "./provisioning/githubProvider.js";
-import { changeRequestPatchSchema, changeRequestSchema, clientSchema, githubCallbackSchema, loginSchema, projectPatchSchema, projectSchema, registerSchema, validate } from "./validation.js";
+import { PlanningAiProvider } from "./planning/aiProvider.js";
+import { reconcileGenerationDeployment } from "./generation/reconcile.js";
+import { redeployGeneratedApplication } from "./generation/deploymentService.js";
+import { changeRequestPatchSchema, changeRequestSchema, clientSchema, deploymentSchema, environmentSchema, githubCallbackSchema, loginSchema, planningAssistanceSchema, projectPatchSchema, projectSchema, registerSchema, validate } from "./validation.js";
 
 export const app = express();
 app.disable("x-powered-by");
 app.use(helmet());
 app.use(cors({ origin: config.webOrigin }));
+app.post("/api/webhooks/github", express.raw({ type: "application/json" }), async (req, res, next) => {
+  try {
+    verifyGitHubWebhook(req.body, req.headers["x-hub-signature-256"]);
+    const payload = JSON.parse(req.body.toString("utf8"));
+    await handleGitHubWebhook(req.headers["x-github-event"], payload);
+    res.status(202).json({ accepted: true });
+  } catch (error) { next(error); }
+});
 app.use(express.json({ limit: "1mb" }));
 
 app.get("/api/health", (_req, res) => res.json({ status: "ok" }));
@@ -76,6 +90,17 @@ app.patch("/api/projects/:id", requireAuth, validate(projectPatchSchema), async 
     const result = await query("update projects set data = data || $1::jsonb, updated_at = now() where id = $2 and organization_id = $3 returning id, data, created_at", [JSON.stringify(req.body), req.params.id, req.auth.organizationId]);
     if (!result.rowCount) return res.status(404).json({ error: "Project not found" });
     const row = result.rows[0]; res.json({ ...row.data, id: row.id, createdAt: row.created_at });
+  } catch (error) { next(error); }
+});
+
+app.post("/api/projects/:id/plan-assistance", requireAuth, validate(planningAssistanceSchema), async (req, res, next) => {
+  try {
+    const result = await query("select data from projects where id=$1 and organization_id=$2", [req.params.id, req.auth.organizationId]);
+    if (!result.rowCount) return res.status(404).json({ error: "Project not found" });
+    const project = result.rows[0].data;
+    const generated = await new PlanningAiProvider().generate({ project, discussion: req.body.discussion, initialPlan: req.body.initialPlan });
+    const version = Number(project.projectPlan?.version || 0) + 1;
+    res.json({ plan: generated.initialPlan, projectPlan: { ...generated.projectPlan, version, generatedAt: new Date().toISOString() } });
   } catch (error) { next(error); }
 });
 
@@ -187,7 +212,7 @@ app.post("/api/projects/:id/generate", requireAuth, async (req, res, next) => {
     const existingBaseline = await client.query("select 1 from generation_jobs where project_id = $1 and organization_id = $2 and status = 'ready' limit 1", [req.params.id, req.auth.organizationId]);
     if (existingBaseline.rowCount) { await client.query("rollback"); return res.status(409).json({ code: "INITIAL_GENERATION_COMPLETE", error: "The initial application already exists. Create a change request for subsequent repository changes." }); }
     const provisioning = await client.query("select provider_connection_id from provisioning_jobs where project_id = $1 and organization_id = $2 and status = 'ready' order by updated_at desc limit 1", [req.params.id, req.auth.organizationId]);
-    if (!provisioning.rowCount) { await client.query("rollback"); return res.status(409).json({ error: "Frontend and backend repositories must finish provisioning before application generation" }); }
+    if (!provisioning.rowCount) { await client.query("rollback"); return res.status(409).json({ error: "Required repositories must finish provisioning before application generation" }); }
     const version = project.rows[0].data.projectPlan.version;
     const idempotencyKey = `${req.params.id}:generation-${version}`;
     const job = await client.query(`insert into generation_jobs (organization_id, project_id, provider_connection_id, idempotency_key) values ($1, $2, $3, $4) on conflict (idempotency_key) do update set status = case when generation_jobs.status = 'failed' then 'queued' else generation_jobs.status end, current_step = case when generation_jobs.status = 'failed' then 'queued' else generation_jobs.current_step end, error = case when generation_jobs.status = 'failed' then null else generation_jobs.error end, attempts = case when generation_jobs.status = 'failed' then 0 else generation_jobs.attempts end, available_at = case when generation_jobs.status = 'failed' then now() else generation_jobs.available_at end, locked_at = case when generation_jobs.status = 'failed' then null else generation_jobs.locked_at end, locked_by = case when generation_jobs.status = 'failed' then null else generation_jobs.locked_by end, updated_at = now() returning id, status, current_step as "currentStep", created_at as "createdAt"`, [req.auth.organizationId, req.params.id, provisioning.rows[0].provider_connection_id, idempotencyKey]);
@@ -200,8 +225,10 @@ app.post("/api/projects/:id/generate", requireAuth, async (req, res, next) => {
 
 app.get("/api/generation-jobs/:id", requireAuth, async (req, res, next) => {
   try {
+    const owned = await query("select 1 from generation_jobs where id=$1 and organization_id=$2", [req.params.id, req.auth.organizationId]);
+    if (!owned.rowCount) return res.status(404).json({ error: "Generation job not found" });
+    await reconcileGenerationDeployment(req.params.id);
     const result = await query(`select id, project_id as "projectId", blueprint_id as "blueprintId", status, current_step as "currentStep", result, error, attempts, available_at as "nextRetryAt", created_at as "createdAt", updated_at as "updatedAt" from generation_jobs where id = $1 and organization_id = $2`, [req.params.id, req.auth.organizationId]);
-    if (!result.rowCount) return res.status(404).json({ error: "Generation job not found" });
     res.json(result.rows[0]);
   } catch (error) { next(error); }
 });
@@ -211,6 +238,19 @@ app.post("/api/generation-jobs/:id/retry", requireAuth, async (req, res, next) =
     const result = await query(`update generation_jobs set status = 'queued', current_step = 'queued', error = null, attempts = 0, available_at = now(), locked_at = null, locked_by = null, updated_at = now() where id = $1 and organization_id = $2 and status = 'failed' returning id, status`, [req.params.id, req.auth.organizationId]);
     if (!result.rowCount) return res.status(409).json({ error: "Only failed generation jobs can be retried" });
     res.status(202).json(result.rows[0]);
+  } catch (error) { next(error); }
+});
+
+app.post("/api/generation-jobs/:id/redeploy", requireAuth, async (req, res, next) => {
+  try {
+    const context = await query(`select gj.id,gj.project_id,gj.organization_id,gj.result,pc.external_owner,pc.installation_id from generation_jobs gj join provider_connections pc on pc.id=gj.provider_connection_id where gj.id=$1 and gj.organization_id=$2 and gj.status='ready'`, [req.params.id, req.auth.organizationId]);
+    if (!context.rowCount) return res.status(409).json({ error: "A completed application generation is required before deployment can be retried" });
+    const job = context.rows[0];
+    const deployment = await redeployGeneratedApplication(job);
+    const result = { ...job.result, deployment };
+    await query("update generation_jobs set result=$1,updated_at=now() where id=$2", [result, job.id]);
+    await query("update projects set data=jsonb_set(data,'{generation,deployment}',$1::jsonb,true),updated_at=now() where id=$2 and organization_id=$3", [JSON.stringify(deployment), job.project_id, job.organization_id]);
+    res.status(202).json(deployment);
   } catch (error) { next(error); }
 });
 
@@ -228,8 +268,11 @@ app.post("/api/projects/:id/change-requests", requireAuth, validate(changeReques
     await client.query("begin");
     const project = await client.query("select id from projects where id = $1 and organization_id = $2 for update", [req.params.id, req.auth.organizationId]);
     if (!project.rowCount) { await client.query("rollback"); return res.status(404).json({ error: "Project not found" }); }
-    const baseline = await client.query("select 1 from generation_jobs where project_id = $1 and organization_id = $2 and status = 'ready' limit 1", [req.params.id, req.auth.organizationId]);
+    const baseline = await client.query("select result->'repositories' as repositories from generation_jobs where project_id = $1 and organization_id = $2 and status = 'ready' order by updated_at desc limit 1", [req.params.id, req.auth.organizationId]);
     if (!baseline.rowCount) { await client.query("rollback"); return res.status(409).json({ error: "Generate the initial application before creating a code change request" }); }
+    const availableTypes = new Set((baseline.rows[0].repositories || []).map((repository) => repository.type));
+    const unavailable = req.body.repositories.find((repository) => !availableTypes.has(repository));
+    if (unavailable) { await client.query("rollback"); return res.status(409).json({ error: `${unavailable} repository is not part of this project's approved architecture` }); }
     const sequence = Number((await client.query("select coalesce(max(sequence), 0) + 1 as sequence from change_requests where project_id = $1", [req.params.id])).rows[0].sequence);
     const result = await client.query(`insert into change_requests (organization_id, project_id, created_by, sequence, title, discussion, acceptance_criteria, repositories) values ($1, $2, $3, $4, $5, $6, $7, $8) returning id, project_id as "projectId", sequence, title, discussion, acceptance_criteria as "acceptanceCriteria", repositories, status, approved_at as "approvedAt", created_at as "createdAt", updated_at as "updatedAt"`, [req.auth.organizationId, req.params.id, req.auth.sub, sequence, req.body.title, req.body.discussion, JSON.stringify(req.body.acceptanceCriteria), JSON.stringify(req.body.repositories)]);
     await client.query("commit");
@@ -294,6 +337,100 @@ app.post("/api/change-requests/:id/implement", requireAuth, async (req, res, nex
     res.status(202).json(job.rows[0]);
   } catch (error) { await client.query("rollback"); next(error); }
   finally { client.release(); }
+});
+
+app.get("/api/change-jobs/:id/cicd", requireAuth, async (req, res, next) => {
+  try {
+    const owned = await query("select 1 from change_jobs where id=$1 and organization_id=$2", [req.params.id, req.auth.organizationId]);
+    if (!owned.rowCount) return res.status(404).json({ error: "Change job not found" });
+    await reconcileChangeRuns(req.params.id);
+    await reconcileDeploymentRuns(req.params.id);
+    const job = await query(`select id,status,current_step as "currentStep",result,error,attempts,updated_at as "updatedAt" from change_jobs where id=$1 and organization_id=$2`, [req.params.id, req.auth.organizationId]);
+    const [runs, deployments] = await Promise.all([
+      query(`select repository_type as "repositoryType",repository_name as "repositoryName",workflow_run_id as "workflowRunId",workflow_name as "workflowName",commit_sha as "commitSha",branch,status,conclusion,details_url as "detailsUrl",updated_at as "updatedAt" from cicd_runs where change_job_id=$1 order by updated_at desc`, [req.params.id]),
+      query(`select d.id,d.environment_id as "environmentId",d.repository_type as "repositoryType",d.repository_name as "repositoryName",d.branch,d.commit_sha as "commitSha",d.status,d.workflow_run_id as "workflowRunId",d.environment_url as "environmentUrl",d.error,e.name as environment,e.requires_approval as "requiresApproval",d.created_at as "createdAt",d.updated_at as "updatedAt" from deployments d join project_environments e on e.id=d.environment_id where d.change_job_id=$1 order by d.created_at desc`, [req.params.id]),
+    ]);
+    res.json({ ...job.rows[0], runs: runs.rows, deployments: deployments.rows });
+  } catch (error) { next(error); }
+});
+
+app.post("/api/change-jobs/:id/merge", requireAuth, async (req, res, next) => {
+  try {
+    const context = await query(`select cj.*,pc.external_owner,pc.installation_id from change_jobs cj join provider_connections pc on pc.id=cj.provider_connection_id where cj.id=$1 and cj.organization_id=$2 and cj.status='ready_to_merge'`, [req.params.id, req.auth.organizationId]);
+    if (!context.rowCount) return res.status(409).json({ error: "Change job must have successful CI before merge" });
+    const job = context.rows[0]; const repositories = job.result.repositories || [];
+    if (repositories.some((repository) => !repository.pullRequestNumber)) return res.status(409).json({ error: "One or more repositories do not have a pull request to merge" });
+    const github = new GitHubProvider(); const token = await github.createInstallationToken(job.installation_id);
+    for (const repository of repositories) await github.mergePullRequest({ token, owner: job.external_owner, repository: repository.name, pullNumber: repository.pullRequestNumber });
+    await query("update change_jobs set status='merged',current_step='merged',updated_at=now() where id=$1", [job.id]);
+    await query("update change_requests set status='implemented',updated_at=now() where id=$1", [job.change_request_id]);
+    await autoDeployDevelopment(job.id);
+    res.json({ id: job.id, status: "merged" });
+  } catch (error) { next(error); }
+});
+
+app.get("/api/projects/:id/environments", requireAuth, async (req, res, next) => {
+  try { const result = await query(`select e.id,e.name,e.environment_type as "environmentType",e.deployment_provider as "deploymentProvider",e.deployment_strategy as "deploymentStrategy",e.requires_approval as "requiresApproval",e.configuration,e.created_at as "createdAt",e.updated_at as "updatedAt" from project_environments e join projects p on p.id=e.project_id where e.project_id=$1 and p.organization_id=$2 order by case e.environment_type when 'development' then 1 when 'test' then 2 when 'production' then 3 else 4 end,e.name`, [req.params.id, req.auth.organizationId]); res.json(result.rows); }
+  catch (error) { next(error); }
+});
+
+app.post("/api/projects/:id/environments", requireAuth, validate(environmentSchema), async (req, res, next) => {
+  try {
+    const project = await query("select 1 from projects where id=$1 and organization_id=$2", [req.params.id, req.auth.organizationId]);
+    if (!project.rowCount) return res.status(404).json({ error: "Project not found" });
+    const configuration = req.body.configuration;
+    const result = await query(`insert into project_environments (organization_id,project_id,name,environment_type,deployment_provider,deployment_strategy,requires_approval,configuration) values ($1,$2,$3,$4,$5,$6,$7,$8) on conflict (project_id,name) do update set environment_type=excluded.environment_type,deployment_provider=excluded.deployment_provider,deployment_strategy=excluded.deployment_strategy,requires_approval=excluded.requires_approval,configuration=excluded.configuration,updated_at=now() returning id,name,environment_type as "environmentType",deployment_provider as "deploymentProvider",deployment_strategy as "deploymentStrategy",requires_approval as "requiresApproval",configuration`, [req.auth.organizationId, req.params.id, req.body.name, req.body.environmentType, req.body.deploymentProvider, req.body.deploymentStrategy, req.body.requiresApproval, configuration]);
+    res.status(201).json(result.rows[0]);
+  } catch (error) { next(error); }
+});
+
+app.delete("/api/projects/:id/environments/:environmentId", requireAuth, async (req, res, next) => {
+  try {
+    const existing = await query(`select e.id from project_environments e join projects p on p.id=e.project_id where e.id=$1 and e.project_id=$2 and p.organization_id=$3`, [req.params.environmentId, req.params.id, req.auth.organizationId]);
+    if (!existing.rowCount) return res.status(404).json({ error: "Environment not found" });
+    const used = await query("select 1 from deployments where environment_id=$1 limit 1", [req.params.environmentId]);
+    if (used.rowCount) return res.status(409).json({ error: "This environment has deployment history and cannot be removed" });
+    await query("delete from project_environments where id=$1", [req.params.environmentId]);
+    res.status(204).end();
+  } catch (error) { next(error); }
+});
+
+app.post("/api/change-jobs/:id/deploy", requireAuth, validate(deploymentSchema), async (req, res, next) => {
+  try {
+    const context = await query(`select cj.*,pc.external_owner,pc.installation_id,e.name as environment,e.requires_approval,e.deployment_provider,e.configuration as environment_configuration from change_jobs cj join provider_connections pc on pc.id=cj.provider_connection_id join project_environments e on e.id=$3 and e.project_id=cj.project_id where cj.id=$1 and cj.organization_id=$2 and cj.status in ('merged','ready','development_ready','test_ready','production_ready')`, [req.params.id, req.auth.organizationId, req.body.environmentId]);
+    if (!context.rowCount) return res.status(409).json({ error: "Change must be merged before deployment and the environment must belong to this project" });
+    const job = context.rows[0];
+    const repositories = (job.result.repositories || []).filter((repository) => job.deployment_provider !== "github" || repository.type === "Frontend");
+    if (!repositories.length) return res.status(409).json({ error: "GitHub Pages preview requires a frontend repository" });
+    const status = job.requires_approval ? "pending_approval" : "queued";
+    const created = [];
+    const github = new GitHubProvider();
+    const token = await github.createInstallationToken(job.installation_id);
+    for (const repository of repositories) {
+      const metadata = await github.getRepository({ token, owner: job.external_owner, repository: repository.name });
+      const deploymentBranch = metadata.default_branch || job.base_branch || "main";
+      const row = (await query(`insert into deployments (organization_id,project_id,change_job_id,environment_id,repository_type,repository_name,branch,commit_sha,status) values ($1,$2,$3,$4,$5,$6,$7,$8,$9) returning id,repository_type as "repositoryType",repository_name as "repositoryName",branch,status`, [req.auth.organizationId, job.project_id, job.id, req.body.environmentId, repository.type, repository.name, deploymentBranch, repository.commitSha, status])).rows[0];
+      created.push(row);
+    }
+    if (!job.requires_approval) {
+      try { await dispatchDeployments(job, created, job.environment); }
+      catch (dispatchError) {
+        await query("update deployments set status='failed',error=$1,updated_at=now() where id=any($2::uuid[])", [{ message: dispatchError.message, status: dispatchError.status || null }, created.map((deployment) => deployment.id)]);
+        throw dispatchError;
+      }
+    }
+    res.status(202).json({ environment: job.environment, status, deployments: created });
+  } catch (error) { next(error); }
+});
+
+app.post("/api/deployments/:id/approve", requireAuth, async (req, res, next) => {
+  try {
+    const result = await query(`select d.*,e.name as environment,e.deployment_provider,e.configuration as environment_configuration,pc.external_owner,pc.installation_id,cj.result from deployments d join project_environments e on e.id=d.environment_id join change_jobs cj on cj.id=d.change_job_id join provider_connections pc on pc.id=cj.provider_connection_id where d.id=$1 and d.organization_id=$2 and d.status='pending_approval'`, [req.params.id, req.auth.organizationId]);
+    if (!result.rowCount) return res.status(409).json({ error: "Deployment is not waiting for approval" });
+    const deployment = result.rows[0]; await dispatchDeployments(deployment, [{ id: deployment.id, repositoryName: deployment.repository_name, branch: deployment.branch }], deployment.environment);
+    await query("update deployments set approved_at=now() where id=$1", [deployment.id]);
+    res.status(202).json({ id: deployment.id, status: "queued" });
+  } catch (error) { next(error); }
 });
 
 app.use((_req, res) => res.status(404).json({ error: "Route not found" }));

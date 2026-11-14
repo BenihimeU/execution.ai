@@ -41,7 +41,7 @@ export class ChangeAiProvider {
 }
 
 function buildPrompt({ project, changeRequest, repository, files }) {
-  return `You are implementing an approved change in an existing ${repository.type} repository. Return JSON matching the supplied schema. Return full content only for files that must be created or changed. Preserve unrelated behavior. Never output .env files, secrets, binaries, lockfiles, or files outside the repository.\n\nPROJECT\n${project.name}\n\nCHANGE TITLE\n${changeRequest.title}\n\nDISCUSSION\n${changeRequest.discussion}\n\nACCEPTANCE CRITERIA\n${changeRequest.acceptance_criteria.map((item) => `- ${item}`).join("\n")}\n\nCURRENT FILES\n${Object.entries(files).map(([path, content]) => `--- ${path}\n${content}`).join("\n")}`;
+  return `You are implementing an approved change in an existing ${repository.type} repository. Return JSON matching the supplied schema. Return full content only for files that must be created or changed. Preserve unrelated behavior. Never output .env files, secrets, binaries, lockfiles, or files outside the repository. Generated code must pass ESLint no-unused-vars: remove unused imports and variables, do not import React solely for JSX, and omit unused catch bindings.\n\nPROJECT\n${project.name}\n\nCHANGE TITLE\n${changeRequest.title}\n\nDISCUSSION\n${changeRequest.discussion}\n\nACCEPTANCE CRITERIA\n${changeRequest.acceptance_criteria.map((item) => `- ${item}`).join("\n")}\n\nCURRENT FILES\n${Object.entries(files).map(([path, content]) => `--- ${path}\n${content}`).join("\n")}`;
 }
 
 function validatePatch(patch, existingFiles) {

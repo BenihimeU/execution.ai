@@ -25,4 +25,14 @@ test("generation emits separated backend and frontend application files", () => 
   assert.ok(backend["src/modules/expenses.js"]);
   assert.ok(frontend["src/App.jsx"].includes("Expense Portal"));
   assert.ok(frontend["generation-blueprint.json"]);
+  assert.match(frontend["eslint.config.js"], /export default/);
+  assert.match(backend["eslint.config.js"], /export default/);
+});
+
+test("frontend-only blueprint generates a static API adapter", () => {
+  const blueprint = createApplicationBlueprint({ ...project, discussion: "Create a static frontend-only website; backend is not required.", projectPlan: { ...project.projectPlan, application: { backendRequired: false } } });
+  const frontend = generatedFrontendFiles(blueprint);
+  assert.equal(blueprint.application.backendRequired, false);
+  assert.match(frontend["src/lib/api.js"], /return \[\]/);
+  assert.doesNotMatch(frontend["src/lib/api.js"], /fetch\(/);
 });

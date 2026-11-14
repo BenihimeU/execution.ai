@@ -4,6 +4,7 @@ import { api } from "../../lib/api.js";
 export function useGenerationJob(jobId, onComplete) {
   const [job, setJob] = useState(null);
   const [error, setError] = useState("");
+  const [deploying, setDeploying] = useState(false);
   const [pollRevision, setPollRevision] = useState(0);
   const onCompleteRef = useRef(onComplete);
   useEffect(() => { onCompleteRef.current = onComplete; }, [onComplete]);
@@ -17,7 +18,8 @@ export function useGenerationJob(jobId, onComplete) {
         const next = await api.getGenerationJob(jobId);
         if (!active) return;
         setJob(next); setError("");
-        if (["ready", "failed"].includes(next.status)) {
+        const deploymentActive = ["queued", "running"].includes(next.result?.deployment?.status);
+        if (["ready", "failed"].includes(next.status) && !deploymentActive) {
           if (next.status === "ready") await onCompleteRef.current?.();
           return;
         }
@@ -42,5 +44,16 @@ export function useGenerationJob(jobId, onComplete) {
     catch (requestError) { setError(requestError.message); }
   }
 
-  return { job, error, retry };
+  async function redeploy() {
+    setError(""); setDeploying(true);
+    try {
+      const deployment = await api.redeployGenerationJob(jobId);
+      setJob((current) => current ? { ...current, result: { ...current.result, deployment } } : current);
+      setPollRevision((revision) => revision + 1);
+    }
+    catch (requestError) { setError(requestError.message); }
+    finally { setDeploying(false); }
+  }
+
+  return { job, error, retry, redeploy, deploying };
 }

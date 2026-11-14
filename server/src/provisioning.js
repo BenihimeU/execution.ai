@@ -1,3 +1,5 @@
+import { projectNeedsBackend } from "./architecture.js";
+
 export function buildProvisioningManifest(projectId, project) {
   if (project.projectPlan?.status !== "approved") {
     const error = new Error("The delivery plan must be approved before provisioning");
@@ -6,15 +8,16 @@ export function buildProvisioningManifest(projectId, project) {
   }
   const slug = project.name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
   const environments = project.environments || ["Development", "Test", "Production"];
-  const repository = (name, type, workflow) => ({ name, type, visibility: "private", defaultBranch: "main", workflow, status: "Pending provider connection" });
+  const generatedBranch = `execution-ai/generation-${project.projectPlan.version}`;
+  const repository = (name, type, workflow) => ({ name, type, visibility: "private", defaultBranch: generatedBranch, workflow, status: "Pending provider connection" });
   return {
     version: 1,
     status: "awaiting_provider",
     idempotencyKey: `${projectId}:plan-${project.projectPlan.version}`,
     provider: "unconnected",
-    repositories: [repository(`${slug}-web`, "Frontend", "web-ci.yml"), repository(`${slug}-api`, "Backend", "api-ci.yml")],
+    repositories: [repository(`${slug}-web`, "Frontend", "web-ci.yml"), ...(projectNeedsBackend(project) ? [repository(`${slug}-api`, "Backend", "api-ci.yml")] : [])],
     environments: environments.map((name, index) => ({ name, protection: index === 0 ? "automatic" : "approval-required", secrets: [], status: "Pending" })),
-    pipelines: environments.map((name, index) => ({ name, trigger: index === 0 ? "merge-to-main" : "promotion", stages: ["install", "lint", "test", "security-scan", "build", "deploy"], status: "Pending" })),
+    pipelines: environments.map((name, index) => ({ name, trigger: index === 0 ? `merge-to-${generatedBranch}` : "promotion", stages: ["install", "lint", "test", "security-scan", "build", "deploy"], status: "Pending" })),
     audit: [{ event: "manifest.created", at: new Date().toISOString(), actor: "authenticated-user" }],
     createdAt: new Date().toISOString(),
   };

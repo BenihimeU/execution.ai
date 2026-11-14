@@ -18,6 +18,7 @@ export const config = {
   githubAppSlug: process.env.GITHUB_APP_SLUG || "",
   githubPrivateKey: (process.env.GITHUB_PRIVATE_KEY || "").replace(/\\n/g, "\n"),
   githubApiUrl: process.env.GITHUB_API_URL || "https://api.github.com",
+  githubWebhookSecret: process.env.GITHUB_WEBHOOK_SECRET || "",
   workerPollMs: Number(process.env.PROVISIONING_WORKER_POLL_MS || 3000),
   workerMaxAttempts: Number(process.env.PROVISIONING_WORKER_MAX_ATTEMPTS || 3),
   aiProvider: (process.env.AI_PROVIDER || "openai").toLowerCase(),
